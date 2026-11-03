@@ -38,24 +38,32 @@ DShotRMT::~DShotRMT()
 // Initialize DShotRMT
 dshot_result_t DShotRMT::begin()
 {
-    dshot_result_t result = init_rmt_tx_channel(_gpio, &_rmt_tx_channel, _is_bidirectional);
-
-    if (!result.success)
-    {
-        _cleanupRmtResources(); // Clean up any allocated resources on failure
-        return result;
-    }
-
+    dshot_result_t result;
+    // An RX channel bound to the same GPIO must be created before TX.
     if (_is_bidirectional)
     {
         result = init_rmt_rx_channel(_gpio, &_rmt_rx_channel, &_rx_event_callbacks, this);
         if (!result.success)
         {
-            _cleanupRmtResources(); // Clean up any allocated resources on failure
+            _cleanupRmtResources();
             return result;
         }
     }
-
+    result = init_rmt_tx_channel(_gpio, &_rmt_tx_channel, _is_bidirectional);
+    if (!result.success)
+    {
+        _cleanupRmtResources();
+        return result;
+    }
+    if (_is_bidirectional)
+    {
+        const rmt_tx_event_callbacks_t callbacks = {.on_trans_done = _on_tx_done};
+        if (rmt_tx_register_event_callbacks(_rmt_tx_channel, &callbacks, this) != ESP_OK)
+        {
+            _cleanupRmtResources();
+            return {false, DSHOT_CALLBACK_REGISTERING_FAILED};
+        }
+    }
     result = init_dshot_encoder(&_dshot_encoder, _rmt_ticks, _pulse_level, _idle_level);
 
     if (!result.success)
@@ -91,6 +99,7 @@ dshot_result_t DShotRMT::sendThrottlePercent(float percent)
     {
         return {false, DSHOT_PERCENT_NOT_IN_RANGE};
     }
+    if (percent == 0.0f) return sendThrottle(0);
 
     // Map percent to DShot throttle range using pre-calculated ratio.
     uint16_t throttle = static_cast<uint16_t>(DSHOT_THROTTLE_MIN + _percent_to_throttle_ratio * percent);
@@ -175,15 +184,15 @@ dshot_result_t DShotRMT::getTelemetry()
     // If no full telemetry, check for eRPM-only data.
     if (_telemetry_ready_flag_atomic)
     {
-        _telemetry_ready_flag_atomic = false; // Reset the flag
-        uint16_t erpm = _last_erpm_atomic;    // Read the atomic variable
-
-        if (erpm != DSHOT_NULL_PACKET && _motor_magnet_count >= MAGNETS_PER_POLE_PAIR)
+        _telemetry_ready_flag_atomic = false;
+        const uint32_t erpm = _last_erpm_atomic;
+        if (_motor_magnet_count >= MAGNETS_PER_POLE_PAIR)
         {
-            // Calculate motor RPM from eRPM and magnet count
-            uint8_t pole_pairs = _motor_magnet_count / MAGNETS_PER_POLE_PAIR;
-            result.erpm = erpm;
-            result.motor_rpm = (erpm / pole_pairs);
+            const uint32_t pole_pairs = _motor_magnet_count / MAGNETS_PER_POLE_PAIR;
+            const uint32_t motor_rpm = erpm / pole_pairs;
+            // Preserve the existing public 16-bit result fields.
+            result.erpm = erpm > UINT16_MAX ? UINT16_MAX : erpm;
+            result.motor_rpm = motor_rpm > UINT16_MAX ? UINT16_MAX : motor_rpm;
             result.success = true;
             result.result_code = DSHOT_TELEMETRY_SUCCESS;
         }
@@ -357,102 +366,79 @@ void DShotRMT::_preCalculateRMTTicks()
 // Private Frame Processing Functions
 dshot_result_t DShotRMT::_sendPacket(const dshot_packet_t &packet)
 {
-    // Ensure enough time has passed since the last transmission.
-    if (!_isFrameIntervalElapsed())
-    {
-        return {true, DSHOT_NONE};
-    }
-
-    if (_is_bidirectional)
-    {
-        // Start the RMT receiver to wait for the ESC's telemetry response.
-        rmt_symbol_word_t rx_symbols[DSHOT_TELEMETRY_FULL_GCR_BITS];
-        size_t rx_size_bytes = DSHOT_TELEMETRY_FULL_GCR_BITS * sizeof(rmt_symbol_word_t);
-
-        rmt_receive_config_t rmt_rx_config = {
-            .signal_range_min_ns = DSHOT_PULSE_MIN_NS,
-            .signal_range_max_ns = DSHOT_PULSE_MAX_NS,
-        };
-
-        if (rmt_receive(_rmt_rx_channel, rx_symbols, rx_size_bytes, &rmt_rx_config) != DSHOT_OK)
-        {
-            return {false, DSHOT_RECEIVER_FAILED};
-        }
-    }
-
+    // Do not silently discard throttle or command frames.
+    while (!_isFrameIntervalElapsed()) delayMicroseconds(1);
     _encoded_frame_value = _buildDShotFrameValue(packet);
-
-    // Byte-swap the 16-bit value for correct transmission order.
-    // The RMT bytes encoder sends MSB of each byte first.
     uint16_t swapped_value = __builtin_bswap16(_encoded_frame_value);
-
-    // The DShot frame is 16 bits, which is 2 bytes.
-    size_t tx_size_bytes = sizeof(swapped_value);
-
-    rmt_transmit_config_t tx_config = {.loop_count = 0}; // No automatic loops.
-
-    // In bidirectional mode, the RMT RX channel must be disabled before transmitting
-    // to prevent the receiver from picking up the outgoing signal (loopback).
-    if (_is_bidirectional)
-    {
-        if (rmt_disable(_rmt_rx_channel) != DSHOT_OK)
-        {
-            return {false, DSHOT_RECEIVER_FAILED};
-        }
-    }
-
-    if (rmt_transmit(_rmt_tx_channel, _dshot_encoder, &swapped_value, tx_size_bytes, &tx_config) != DSHOT_OK)
+    rmt_transmit_config_t tx_config = {.loop_count = 0};
+    // Reset a prior RX transaction before TX. RX stays enabled but idle;
+    // the TX-done ISR calls rmt_receive() to actually begin capturing.
+    if (_is_bidirectional &&
+        (rmt_disable(_rmt_rx_channel) != ESP_OK ||
+         rmt_enable(_rmt_rx_channel) != ESP_OK))
+        return {false, DSHOT_RECEIVER_FAILED};
+    _rx_start_failed_atomic = false;
+    if (rmt_transmit(_rmt_tx_channel, _dshot_encoder, &swapped_value,
+                     sizeof(swapped_value), &tx_config) != ESP_OK ||
+        rmt_tx_wait_all_done(_rmt_tx_channel, -1) != ESP_OK)
     {
         return {false, DSHOT_TRANSMISSION_FAILED};
     }
-
-    // Re-enable RMT RX immediately after transmission to catch the response.
-    if (_is_bidirectional)
-    {
-        if (rmt_enable(_rmt_rx_channel) != DSHOT_OK)
-        {
-            return {false, DSHOT_RECEIVER_FAILED};
-        }
-    }
-
-    _recordFrameTransmissionTime(); // Reset the timer for the next frame.
-
+    // TX-done ISR starts RX only after the outgoing frame finishes.
+    if (_is_bidirectional && _rx_start_failed_atomic)
+        return {false, DSHOT_RECEIVER_FAILED};
+    _recordFrameTransmissionTime();
     return {true, DSHOT_TRANSMISSION_SUCCESS};
 }
 
-// This function is placed in IRAM for high performance, as it may be
-// called from an ISR context depending on RMT driver implementation.
-uint16_t IRAM_ATTR DShotRMT::_decodeDShotFrame(const rmt_symbol_word_t *symbols) const
+// Decode run-length RMT symbols -> 21 NRZI bits -> 20 GCR bits -> 12-bit period.
+uint32_t IRAM_ATTR DShotRMT::_decodeDShotFrame(const rmt_symbol_word_t *symbols, size_t num_symbols) const
 {
-    uint32_t gcr_value = 0;
-
-    // Decode RMT symbols into a 21-bit GCR (Group Code Recording) value.
-    // The ESC sends back a signal where the duration of high vs. low determines the bit value.
-    for (size_t i = 0; i < DSHOT_ERPM_FRAME_GCR_BITS; ++i)
+    static const uint8_t gcr_to_nibble[32] = {
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,9,10,11,0xff,13,14,15,
+        0xff,0xff,2,3,0xff,5,6,7,
+        0xff,0,8,1,0xff,4,12,0xff
+    };
+    // ESC telemetry is sent at 5/4 of the outgoing DShot bitrate.
+    const uint32_t ticks = (_rmt_ticks.bit_length_ticks * 4 + 2) / 5;
+    if (!ticks || !num_symbols) return UINT32_MAX;
+    uint32_t nrzi = 0;
+    uint32_t count = 0;
+    for (size_t i = 0; i < num_symbols && count < 21; ++i)
     {
-        bool bit_is_one = symbols[i].duration0 > symbols[i].duration1;
-        gcr_value = (gcr_value << 1) | bit_is_one;
+        const uint16_t duration[2] = {symbols[i].duration0, symbols[i].duration1};
+        const uint8_t level[2] = {static_cast<uint8_t>(symbols[i].level0), static_cast<uint8_t>(symbols[i].level1)};
+        for (int part = 0; part < 2 && count < 21; ++part)
+        {
+            if (!duration[part]) break;
+            uint32_t bits = (duration[part] + ticks / 2) / ticks;
+            while (bits-- && count < 21)
+            {
+                nrzi = (nrzi << 1) | level[part];
+                ++count;
+            }
+        }
     }
-
-    // Perform GCR decoding (GCR = Value ^ (Value >> 1)).
-    uint32_t decoded_frame = gcr_value ^ (gcr_value >> 1);
-
-    // Extract the 16-bit DShot-like frame from the decoded data.
-    uint16_t data_and_crc = (decoded_frame & DSHOT_FULL_PACKET);
-
-    // The eRPM telemetry frame consists of 12 data bits and 4 CRC bits.
-    uint16_t received_data = data_and_crc >> DSHOT_CRC_BIT_SHIFT;
-    uint16_t received_crc = data_and_crc & DSHOT_CRC_MASK;
-
-    // Calculate and validate the CRC for the received data.
-    uint16_t calculated_crc = _calculateCRC(received_data);
-    if (received_crc != calculated_crc)
+    // The final high level may not be captured before RX idle timeout.
+    while (count++ < 21) nrzi = (nrzi << 1) | 1u;
+    const uint32_t gcr = (nrzi ^ (nrzi >> 1)) & 0xfffff;
+    uint32_t frame = 0;
+    for (int i = 0; i < 4; ++i)
     {
-        return DSHOT_NULL_PACKET;
+        const uint8_t nibble = gcr_to_nibble[(gcr >> (i * 5)) & 31];
+        if (nibble == 0xff) return UINT32_MAX;
+        frame |= static_cast<uint32_t>(nibble) << (i * 4);
     }
-
-    // Return the eRPM value (the first 11 bits of the data).
-    return received_data & DSHOT_THROTTLE_MAX;
+    // Bidirectional eRPM telemetry has the inverted-nibble XOR checksum.
+    if (((frame ^ (frame >> 4) ^ (frame >> 8) ^ (frame >> 12)) & 15) != 15)
+        return UINT32_MAX;
+    const uint32_t data = frame >> 4;
+    if (data == 0xfff) return 0; // ESC reports motor stopped.
+    // Extended telemetry uses the high nibble as a type, not an eRPM period.
+    if (!(data & 0x100) && (data & 0xf00)) return UINT32_MAX;
+    const uint32_t period_us = (data & 0x1ff) << (data >> 9);
+    return period_us ? (60000000u + period_us / 2) / period_us : UINT32_MAX;
 }
 
 // Timing Control Functions
@@ -471,6 +457,18 @@ void DShotRMT::_recordFrameTransmissionTime()
 }
 
 // Static Callback Functions
+bool IRAM_ATTR DShotRMT::_on_tx_done(rmt_channel_handle_t, const rmt_tx_done_event_data_t *, void *user_data)
+{
+    DShotRMT *instance = static_cast<DShotRMT *>(user_data);
+    const rmt_receive_config_t config = {
+        .signal_range_min_ns = DSHOT_PULSE_MIN_NS,
+        .signal_range_max_ns = DSHOT_PULSE_MAX_NS,
+    };
+    instance->_rx_start_failed_atomic =
+        rmt_receive(instance->_rmt_rx_channel, instance->_rx_symbols,
+                    sizeof(instance->_rx_symbols), &config) != ESP_OK;
+    return false;
+}
 // Processes a full telemetry frame from the RMT RX ISR.
 void IRAM_ATTR DShotRMT::_processFullTelemetryFrame(const rmt_symbol_word_t *symbols, size_t num_symbols)
 {
@@ -552,26 +550,16 @@ void IRAM_ATTR DShotRMT::_processFullTelemetryFrame(const rmt_symbol_word_t *sym
 bool IRAM_ATTR DShotRMT::_on_rx_done(rmt_channel_handle_t rmt_rx_channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     DShotRMT *instance = static_cast<DShotRMT *>(user_data);
-
-    if (edata)
+    if (edata && edata->num_symbols > 0 &&
+        edata->num_symbols <= DSHOT_ERPM_FRAME_GCR_BITS)
     {
-        if (edata->num_symbols == DSHOT_TELEMETRY_FULL_GCR_BITS)
+        const uint32_t erpm = instance->_decodeDShotFrame(edata->received_symbols, edata->num_symbols);
+        if (erpm != UINT32_MAX)
         {
-            instance->_processFullTelemetryFrame(edata->received_symbols, edata->num_symbols);
-        }
-        else if (edata->num_symbols == DSHOT_ERPM_FRAME_GCR_BITS)
-        {
-            uint16_t erpm = instance->_decodeDShotFrame(edata->received_symbols);
-
-            if (erpm != DSHOT_NULL_PACKET)
-            {
-                // Atomically store the new eRPM value and set the flag.
-                instance->_last_erpm_atomic.store(erpm);
-                instance->_telemetry_ready_flag_atomic.store(true);
-            }
+            instance->_last_erpm_atomic.store(erpm);
+            instance->_telemetry_ready_flag_atomic.store(true);
         }
     }
-
     return false;
 }
 

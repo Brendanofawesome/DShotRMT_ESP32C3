@@ -19,6 +19,8 @@ dshot_result_t init_rmt_tx_channel(gpio_num_t gpio, rmt_channel_handle_t *out_ch
         .trans_queue_depth = RMT_QUEUE_DEPTH,
         .flags = {
             .invert_out = is_bidirectional ? 1 : 0,
+            .io_loop_back = is_bidirectional ? 1u : 0u,
+            .io_od_mode = is_bidirectional ? 1u : 0u,
             .init_level = 0}};
 
     rmt_transmit_config_t rmt_tx_config = {}; // Initialize all members to zero
@@ -45,6 +47,8 @@ dshot_result_t init_rmt_rx_channel(gpio_num_t gpio, rmt_channel_handle_t *out_ch
         .clk_src = DSHOT_CLOCK_SRC_DEFAULT,
         .resolution_hz = DSHOT_RMT_RESOLUTION,
         .mem_block_symbols = RMT_RX_BUFFER_SYMBOLS,
+        // Keep the GPIO input connected when the TX channel shares this pin.
+        .flags = {.io_loop_back = 1},
     };
 
     if (rmt_new_rx_channel(&rx_channel_config, out_channel) != DSHOT_OK)

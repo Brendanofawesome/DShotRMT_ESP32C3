@@ -83,6 +83,7 @@ public:
 
 private:
     dshot_result_t _sendRawDshotFrame(uint16_t value);
+    static bool IRAM_ATTR _on_tx_done(rmt_channel_handle_t rmt_tx_channel, const rmt_tx_done_event_data_t *edata, void *user_data);
     static bool IRAM_ATTR _on_rx_done(rmt_channel_handle_t rmt_rx_channel, const rmt_rx_done_event_data_t *edata, void *user_data);
 
     // DShot Configuration Parameters
@@ -109,7 +110,9 @@ private:
     uint16_t _encoded_frame_value = 0;       // Last encoded 16-bit DShot frame value
 
     // Telemetry Related Variables
-    std::atomic<uint16_t> _last_erpm_atomic = 0;                          // Atomically stored last received eRPM value
+    rmt_symbol_word_t _rx_symbols[DSHOT_ERPM_FRAME_GCR_BITS] = {};
+    std::atomic<bool> _rx_start_failed_atomic = false;
+    std::atomic<uint32_t> _last_erpm_atomic = 0;                          // Atomically stored last received eRPM value
     std::atomic<bool> _telemetry_ready_flag_atomic = false;               // Atomically stored flag indicating new telemetry data
     std::atomic<dshot_telemetry_data_t> _last_telemetry_data_atomic = {}; // Atomically stored last received full telemetry data
     std::atomic<bool> _full_telemetry_ready_flag_atomic = false;          // Atomically stored flag indicating new full telemetry data
@@ -127,7 +130,7 @@ private:
     void _extractTelemetryData(const uint8_t *raw_telemetry_bytes, dshot_telemetry_data_t &telemetry_data) const; // Extracts telemetry data from raw bytes
     void _preCalculateRMTTicks();                                                                                 // Pre-calculates RMT timing ticks for the selected DShot mode
     dshot_result_t _sendPacket(const dshot_packet_t &packet);                                                     // Sends a DShot frame via RMT TX channel
-    uint16_t IRAM_ATTR _decodeDShotFrame(const rmt_symbol_word_t *symbols) const;                                 // Decodes a received RMT symbol array into an eRPM value
+    uint32_t IRAM_ATTR _decodeDShotFrame(const rmt_symbol_word_t *symbols, size_t num_symbols) const;             // Decodes a received RMT symbol array into an eRPM value
     void IRAM_ATTR _processFullTelemetryFrame(const rmt_symbol_word_t *symbols, size_t num_symbols);              // Processes a full telemetry frame
     bool IRAM_ATTR _isFrameIntervalElapsed() const;                                                               // Checks if enough time has passed since the last frame transmission
     void _recordFrameTransmissionTime();                                                                          // Records the current time as the last frame transmission time

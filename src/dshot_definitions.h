@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <driver/rmt_common.h>
+#include <soc/soc_caps.h>
 
 // =================================================================================
 // DShot Protocol Constants
@@ -89,14 +90,17 @@ const dshot_timing_us_t DSHOT_TIMING_US[] = {
 static constexpr auto DSHOT_CLOCK_SRC_DEFAULT = RMT_CLK_SRC_DEFAULT;
 static constexpr auto DSHOT_RMT_RESOLUTION = 8000000;                    // 8 MHz resolution
 static constexpr auto RMT_TICKS_PER_US = DSHOT_RMT_RESOLUTION / 1000000; // RMT Ticks per microsecond
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+static constexpr auto RMT_TX_BUFFER_SYMBOLS = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+static constexpr auto RMT_RX_BUFFER_SYMBOLS = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+#else
 static constexpr auto RMT_TX_BUFFER_SYMBOLS = 64;
 static constexpr auto RMT_RX_BUFFER_SYMBOLS = DSHOT_TELEMETRY_FULL_GCR_BITS;
+#endif
 static constexpr auto RMT_QUEUE_DEPTH = 1;
-
 // --- RMT Receiver Configuration ---
-static constexpr uint32_t DSHOT_PULSE_MIN_NS = 800;  // 0.8us minimum pulse duration for receiver
-static constexpr uint32_t DSHOT_PULSE_MAX_NS = 8000; // 8.0us maximum pulse duration for receiver
-
+static constexpr uint32_t DSHOT_PULSE_MIN_NS = 200;   // Accept short telemetry pulses
+static constexpr uint32_t DSHOT_PULSE_MAX_NS = 40000; // Allow long GCR runs; finish on idle
 // Stores pre-calculated timing values in RMT ticks for efficient signal generation.
 typedef struct rmt_ticks
 {
