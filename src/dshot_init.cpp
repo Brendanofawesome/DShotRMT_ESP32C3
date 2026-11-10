@@ -18,7 +18,7 @@ dshot_result_t init_rmt_tx_channel(gpio_num_t gpio, rmt_channel_handle_t *out_ch
         .mem_block_symbols = RMT_TX_BUFFER_SYMBOLS,
         .trans_queue_depth = RMT_QUEUE_DEPTH,
         .flags = {
-            .invert_out = is_bidirectional ? 1 : 0,
+            .invert_out = is_bidirectional ? 1u : 0u,
             .io_loop_back = is_bidirectional ? 1u : 0u,
             .io_od_mode = is_bidirectional ? 1u : 0u,
             .init_level = 0}};
