@@ -392,7 +392,7 @@ dshot_result_t DShotRMT::_sendPacket(const dshot_packet_t &packet)
 }
 
 // Decode run-length RMT symbols -> 21 NRZI bits -> 20 GCR bits -> 12-bit period.
-uint32_t IRAM_ATTR DShotRMT::_decodeDShotFrame(const rmt_symbol_word_t *symbols, size_t num_symbols) const
+uint32_t _ATTR DShotRMT::_decodeDShotFrame(const rmt_symbol_word_t *symbols, size_t num_symbols) const
 {
     static const uint8_t gcr_to_nibble[32] = {
         0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
@@ -442,7 +442,7 @@ uint32_t IRAM_ATTR DShotRMT::_decodeDShotFrame(const rmt_symbol_word_t *symbols,
 }
 
 // Timing Control Functions
-bool IRAM_ATTR DShotRMT::_isFrameIntervalElapsed() const
+bool _ATTR DShotRMT::_isFrameIntervalElapsed() const
 {
     // Check if the minimum interval between frames has passed.
     uint64_t current_time = esp_timer_get_time();
@@ -457,7 +457,7 @@ void DShotRMT::_recordFrameTransmissionTime()
 }
 
 // Static Callback Functions
-bool IRAM_ATTR DShotRMT::_on_tx_done(rmt_channel_handle_t, const rmt_tx_done_event_data_t *, void *user_data)
+bool _ATTR DShotRMT::_on_tx_done(rmt_channel_handle_t, const rmt_tx_done_event_data_t *, void *user_data)
 {
     DShotRMT *instance = static_cast<DShotRMT *>(user_data);
     const rmt_receive_config_t config = {
@@ -470,7 +470,7 @@ bool IRAM_ATTR DShotRMT::_on_tx_done(rmt_channel_handle_t, const rmt_tx_done_eve
     return false;
 }
 // Processes a full telemetry frame from the RMT RX ISR.
-void IRAM_ATTR DShotRMT::_processFullTelemetryFrame(const rmt_symbol_word_t *symbols, size_t num_symbols)
+void _ATTR DShotRMT::_processFullTelemetryFrame(const rmt_symbol_word_t *symbols, size_t num_symbols)
 {
     if (num_symbols != DSHOT_TELEMETRY_FULL_GCR_BITS)
     {
@@ -547,7 +547,7 @@ void IRAM_ATTR DShotRMT::_processFullTelemetryFrame(const rmt_symbol_word_t *sym
 }
 
 // This function is called by the RMT driver's ISR when a frame is received.
-bool IRAM_ATTR DShotRMT::_on_rx_done(rmt_channel_handle_t rmt_rx_channel, const rmt_rx_done_event_data_t *edata, void *user_data)
+bool _ATTR DShotRMT::_on_rx_done(rmt_channel_handle_t rmt_rx_channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
     DShotRMT *instance = static_cast<DShotRMT *>(user_data);
     if (edata && edata->num_symbols > 0 &&
