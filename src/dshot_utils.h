@@ -52,6 +52,8 @@ inline const char *get_result_code_str(dshot_msg_code_t code)
         return TX_INIT_FAILED;
     case DSHOT_RX_INIT_FAILED:
         return RX_INIT_FAILED;
+    case DSHOT_TELEMETRY_DATA_AVAILABLE:
+        return "Extended telemetry received";
     case DSHOT_ENCODER_INIT_FAILED:
         return ENCODER_INIT_FAILED;
     case DSHOT_CALLBACK_REGISTERING_FAILED:

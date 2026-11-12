@@ -88,19 +88,23 @@ const dshot_timing_us_t DSHOT_TIMING_US[] = {
 
 // --- RMT Clock & Buffer Configuration ---
 static constexpr auto DSHOT_CLOCK_SRC_DEFAULT = RMT_CLK_SRC_DEFAULT;
-static constexpr auto DSHOT_RMT_RESOLUTION = 8000000;                    // 8 MHz resolution
-static constexpr auto RMT_TICKS_PER_US = DSHOT_RMT_RESOLUTION / 1000000; // RMT Ticks per microsecond
-#ifdef CONFIG_IDF_TARGET_ESP32C3
-static constexpr auto RMT_TX_BUFFER_SYMBOLS = SOC_RMT_MEM_WORDS_PER_CHANNEL;
-static constexpr auto RMT_RX_BUFFER_SYMBOLS = SOC_RMT_MEM_WORDS_PER_CHANNEL;
-#else
-static constexpr auto RMT_TX_BUFFER_SYMBOLS = 64;
-static constexpr auto RMT_RX_BUFFER_SYMBOLS = DSHOT_TELEMETRY_FULL_GCR_BITS;
-#endif
+static constexpr auto DSHOT_RMT_RESOLUTION = 10000000;
+static constexpr auto RMT_TICKS_PER_US =
+    DSHOT_RMT_RESOLUTION / 1000000;
+
+// Exactly one hardware block per channel: 48 symbols on ESP32-C3.
+static constexpr auto RMT_TX_BUFFER_SYMBOLS =
+    SOC_RMT_MEM_WORDS_PER_CHANNEL;
+static constexpr auto RMT_RX_BUFFER_SYMBOLS =
+    SOC_RMT_MEM_WORDS_PER_CHANNEL;
 static constexpr auto RMT_QUEUE_DEPTH = 1;
+
+
 // --- RMT Receiver Configuration ---
 static constexpr uint32_t DSHOT_PULSE_MIN_NS = 200;   // Accept short telemetry pulses
 static constexpr uint32_t DSHOT_PULSE_MAX_NS = 40000; // Allow long GCR runs; finish on idle
+static constexpr uint32_t DSHOT_OPERATION_TIMEOUT_US = 5000;
+
 // Stores pre-calculated timing values in RMT ticks for efficient signal generation.
 typedef struct rmt_ticks
 {
@@ -139,13 +143,22 @@ typedef struct dshot_packet
 // Structure for decoded DShot telemetry data (from ESC)
 typedef struct dshot_telemetry_data
 {
-    uint16_t rpm;         // Motor RPM
-    uint16_t voltage;     // Voltage in mV
-    uint16_t current;     // Current in mA
-    uint16_t consumption; // Consumption in mAh
-    int8_t temperature;   // Temperature in Celsius
-    uint8_t errors;       // Error flags / count
+    uint32_t rpm;         // Actual electrical RPM
+    uint16_t voltage;     // mV
+    uint32_t current;     // mA
+    uint16_t consumption; // Not provided by standard bidirectional EDT
+    int16_t temperature;  // Celsius
+    uint8_t errors;       // Raw EDT status byte
 } dshot_telemetry_data_t;
+
+enum dshot_telemetry_field_t : uint16_t
+{
+    DSHOT_TELEM_HAS_RPM = 1,
+    DSHOT_TELEM_HAS_TEMPERATURE = 2,
+    DSHOT_TELEM_HAS_VOLTAGE = 4,
+    DSHOT_TELEM_HAS_CURRENT = 8,
+    DSHOT_TELEM_HAS_STATUS = 16
+};
 
 // --- Library Result Codes & Structure ---
 enum dshot_msg_code_t
@@ -182,11 +195,21 @@ enum dshot_msg_code_t
 typedef struct dshot_result
 {
     bool success;
-    dshot_msg_code_t result_code;          // Specific error or success code.
-    uint16_t erpm;                         // Electrical RPM (eRPM) if telemetry is successful.
-    uint16_t motor_rpm;                    // Motor RPM if telemetry is successful and magnet count is known.
-    dshot_telemetry_data_t telemetry_data; // Full telemetry data if available
-    bool telemetry_available;              // Flag to indicate if telemetry_data is valid
+    dshot_msg_code_t result_code;
+    uint32_t erpm;       // Actual electrical RPM
+    uint32_t motor_rpm;  // Actual mechanical RPM
+
+    dshot_telemetry_data_t telemetry_data;
+    bool telemetry_available;
+
+    // Valid fields in the accumulated telemetry_data.
+    uint16_t telemetry_fields;
+
+    // Latest received sample:
+    // 1=RPM, 2=temperature, 4=voltage, 6=current,
+    // 8/A=debug, C=stress, E=status.
+    uint8_t telemetry_type;
+    uint8_t telemetry_value;
 } dshot_result_t;
 
 // --- DShot Commands ---
